@@ -4,6 +4,7 @@ This project crawls user and usage data from the regcheck tool and stores this d
 
 ## Project Structure
 
+```text
 .
 ├── config.py
 ├── mock_config.py
@@ -23,6 +24,7 @@ This project crawls user and usage data from the regcheck tool and stores this d
 │   └── simulated/
 │
 └──logs/
+```
 
 ## Set up
 
