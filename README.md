@@ -28,8 +28,8 @@ This project crawls user and usage data from the regcheck tool and stores this d
 
 ## Set up
 
-Nessecary software:
-* **Python**: `3.10+`
+Necessary software:
+* **Python**: `3.10+` (to run `.py`-scripts)
 * **Tableau Desktop**: `2023.3+` (to view `code/02_dashboard.twb`)
 
 ```bash
