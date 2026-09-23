@@ -1,5 +1,13 @@
+# Log and data files
+logs/*.log
+data/production/*
+!data/production/.gitkeep
+data/simulation/*
+!data/produciton/.gitkeep
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
+*.py[cod]
 *.py[codz]
 *$py.class
 
