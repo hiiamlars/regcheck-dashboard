@@ -1,0 +1,228 @@
+---
+title: "regcheck Dashboard"
+date: today
+date-format: "DD/MM/YYYY"
+
+format:
+  html:
+    output-file: dashboard.html
+    embed-resources: true
+    toc: true
+    toc-location: left
+
+execute:
+  echo: false
+  warning: false
+
+jupyter: python
+---
+
+```{python}
+#| include: false
+import logging
+import sys
+from pathlib import Path
+
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import pandas as pd
+
+CWD = Path.cwd().resolve()
+PROJECT_ROOT = CWD if (CWD / "config.py").exists() else CWD.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from config import (
+    LOG_FILE_PATH,
+    SURVEY_RESPONSE_CSV_PATH,
+    ACCOUNTS_PER_DAY_CSV_PATH,
+    REPORTS_PER_USER_CSV_PATH,
+)
+
+LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
+    handlers=[logging.FileHandler(LOG_FILE_PATH, mode="a", encoding="utf-8")],
+    force=True,
+)
+logger = logging.getLogger("dashboard")
+
+FIG_DIR = PROJECT_ROOT / "output" / "figures"
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+plt.rcParams.update({
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "grid.alpha": 0.3,
+})
+FIGSIZE = (7, 3.5)
+FIG_DPI = 200
+MARKERSIZE = 3
+
+survey = pd.read_csv(SURVEY_RESPONSE_CSV_PATH)
+accounts = pd.read_csv(ACCOUNTS_PER_DAY_CSV_PATH)
+reports = pd.read_csv(REPORTS_PER_USER_CSV_PATH)
+
+
+def start(plot_id, df_name, df, columns):
+    """Log the plot attempt and check that the required columns are present."""
+    logger.info("[%s] Plot attempted", plot_id)
+    missing = []
+
+    for c in columns:
+        if c not in df.columns:
+            missing.append(c)
+    if missing:
+        logger.error("[%s] Missing column(s) %s in '%s'", plot_id, missing, df_name)
+        raise KeyError(f"{plot_id}: column(s) {missing} not found in '{df_name}'")
+    logger.info("[%s] Data present in '%s' with column(s) %s (%d rows)",
+                plot_id, df_name, columns, len(df))
+
+
+def to_day(series, utc=False):
+    """Parse timestamps and reduce them to midnight of their day."""
+    return pd.to_datetime(series, errors="coerce", utc=utc).dt.tz_localize(None).dt.normalize()
+
+
+def fill_days(series, ffill=False):
+    """Reindex a date-indexed series to every day from its first date until today."""
+    days = pd.date_range(series.index.min(),
+                         max(series.index.max(), pd.Timestamp.now().normalize()),
+                         freq="D")
+    series = series.reindex(days)
+    return series.ffill().fillna(0) if ffill else series.fillna(0)
+
+
+def finish(fig, plot_id, date_axis=None):
+    """Format the date axis (optional), save the figure as PNG, show it, log the export."""
+    if date_axis is not None:
+        date_axis.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+        date_axis.set_xlabel("Date (DD/MM)")
+    fig.tight_layout()
+    path = FIG_DIR / f"{plot_id}.png"
+    fig.savefig(path, dpi=FIG_DPI)
+    plt.show()
+    logger.info("[%s] Exported successfully to %s", plot_id, path)
+
+
+def cost_plot(plot_id, column, ylabel):
+    """Cumulative cost line chart (used for total and LLM cost)."""
+    start(plot_id, "survey_responses", survey, ["submitted_at", column])
+    df = survey.assign(day=to_day(survey["submitted_at"], utc=True)).dropna(subset=["day"])
+    df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0.0)
+    cum = fill_days(df.groupby("day")[column].sum()).cumsum()
+
+    fig, ax = plt.subplots(figsize=FIGSIZE)
+    ax.plot(cum.index, cum.values, marker="o", markersize=MARKERSIZE)
+    ax.set_ylabel(ylabel)
+    ax.yaxis.set_major_formatter("${x:,.2f}")
+    finish(fig, plot_id, ax)
+```
+
+## Daily Submissions
+
+```{python}
+plot_id = "plot_1_daily_submissions"
+start(plot_id, "survey_responses", survey, ["submitted_at"])
+
+days = to_day(survey["submitted_at"], utc=True).dropna()
+daily = fill_days(days.value_counts().sort_index())
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+ax.bar(daily.index, daily.values)
+ax.set_ylabel("Number of Submissions")
+finish(fig, plot_id, ax)
+```
+
+## Daily New Accounts
+
+```{python}
+plot_id = "plot_2_daily_new_accounts"
+start(plot_id, "accounts_per_day", accounts, ["date", "new_accounts"])
+
+df = accounts.assign(day=to_day(accounts["date"])).dropna(subset=["day"])
+new_accounts = fill_days(df.set_index("day")["new_accounts"])
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+ax.bar(new_accounts.index, new_accounts.values)
+ax.set_ylabel("Number of New Accounts")
+finish(fig, plot_id, ax)
+```
+
+## Cumulative Accounts
+
+```{python}
+plot_id = "plot_3_cumulative_accounts"
+start(plot_id, "accounts_per_day", accounts, ["date", "cumulative_accounts"])
+
+df = accounts.assign(day=to_day(accounts["date"])).dropna(subset=["day"]).sort_values("day")
+cum_accounts = fill_days(df.set_index("day")["cumulative_accounts"], ffill=True)
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+ax.plot(cum_accounts.index, cum_accounts.values, marker="o", markersize=MARKERSIZE)
+ax.set_ylabel("Cumulative Accounts")
+finish(fig, plot_id, ax)
+```
+
+## Research Field Distribution
+
+```{python}
+plot_id = "plot_4_research_field"
+start(plot_id, "survey_responses", survey, ["research_field"])
+
+counts = survey["research_field"].dropna().value_counts().sort_values()
+
+fig, ax = plt.subplots(figsize=(7, max(2.5, 0.4 * len(counts))))
+counts.plot.barh(ax=ax)
+ax.set_xlabel("Number of Responses")
+ax.set_ylabel("")
+finish(fig, plot_id)
+```
+
+## Domain Distribution
+
+```{python}
+plot_id = "plot_5_domain_distribution"
+start(plot_id, "survey_responses", survey, ["survey_comparison_type"])
+
+counts = (survey["survey_comparison_type"].dropna().astype(str)
+          .str.replace("_", " ").str.title()
+          .value_counts().sort_values())
+
+fig, ax = plt.subplots(figsize=(7, max(2.5, 0.4 * len(counts))))
+counts.plot.barh(ax=ax)
+ax.set_xlabel("Number of Responses")
+ax.set_ylabel("")
+finish(fig, plot_id)
+```
+
+## Cumulative Total Cost (USD)
+
+```{python}
+cost_plot("plot_6_cumulative_total_cost", "cost_total_usd", "Cumulative Total Cost (USD)")
+```
+
+## Cumulative LLM Cost (USD)
+
+```{python}
+cost_plot("plot_7_cumulative_llm_cost", "cost_llm_usd", "Cumulative LLM Cost (USD)")
+```
+
+## Reports per User Distribution
+
+```{python}
+plot_id = "plot_8_reports_per_user"
+start(plot_id, "reports_per_user", reports, ["owner_id", "total_reports"])
+
+labels = ["0–9", "10–19", "20+"]
+total = pd.to_numeric(reports["total_reports"], errors="coerce").dropna()
+bins = pd.cut(total, bins=[-1, 9, 19, float("inf")], labels=labels)
+counts = bins.value_counts().reindex(labels, fill_value=0)
+
+fig, ax = plt.subplots(figsize=FIGSIZE)
+ax.bar(labels, counts.values)
+ax.set_xlabel("Reports per User Range")
+ax.set_ylabel("Number of Accounts")
+finish(fig, plot_id)
+```

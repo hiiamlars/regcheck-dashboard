@@ -1,100 +1,181 @@
 """
-01a_mock_redis.py
+00a_mock_redis.py
 -----------------
-Generates mock survey responses and exports them into a CSV file.
+Generates mock survey responses from REDIS and exports them into a CSV file.
 """
 
 import csv
 import logging
-import os
+from pathlib import Path
 import random
 import sys
+from typing import Union
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = SCRIPT_DIR if os.path.exists(os.path.join(SCRIPT_DIR, "mock_config.py")) else os.path.dirname(SCRIPT_DIR)
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR if (SCRIPT_DIR / "config.py").exists() else SCRIPT_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from mock_config import (
-    ACADEMIC_POSITIONS,
-    CSV_PATH,
-    LLM_CLIENTS,
-    MODEL_COMBINATIONS,
-    NUM_RECORDS,
-    REASONING_EFFORTS,
-    RESEARCH_FIELDS,
-    SIMULATION_LOG_PATH,
-    SURVEY_COMPARISON_TYPES,
-    TASK_COMPARISON_TYPES,
-    USE_CASES,
+from config import (
+    SURVEY_RESPONSE_CSV_PATH,
+    LOG_FILE_PATH,
+    DAYS,
+    get_shared_owner_pool,
 )
 
-# Logging Configuration
-SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
-os.makedirs(os.path.dirname(SIMULATION_LOG_PATH), exist_ok=True)
+ACADEMIC_POSITIONS = [
+    "Postdoc",
+    "Masters",
+    "Professor",
+    None,
+]
 
+COST_PER_EMBEDDING = 0.00005
+
+COST_PER_INPUT_TOKEN = 0.000003
+
+COST_PER_OUTPUT_TOKEN = 0.000015
+
+EMBEDDING_TOKEN_RANGE = (500, 10000)
+
+FIELDNAMES = [
+    "task_id",
+    "submitted_at",
+    "research_field",
+    "academic_position",
+    "use_case",
+    "skipped",
+    "from_profile",
+    "survey_comparison_type",
+    "state",
+    "task_comparison_type",
+    "total_dimensions",
+    "owner_id",
+    "is_signed_in",
+    "llm_client",
+    "parser_choice",
+    "reasoning_effort",
+    "cost_total_usd",
+    "cost_llm_usd",
+    "cost_embedding_usd",
+    "input_tokens",
+    "output_tokens",
+    "embedding_tokens",
+    "llm_calls",
+    "cost_estimate_complete",
+    "models_used",
+]
+
+INPUT_TOKEN_RANGE = (1500, 4500)
+
+LLM_CALLS_RANGE = (1, 12)
+
+LLM_CLIENTS = ["openai", "claude", "qwen"]
+
+MICROSECOND_RANGE = (0, 999999)
+
+MODEL_COMBINATIONS = [
+    "gpt-5.5,text-embedding-3-large",
+    "qwen/qwen3.6-27b,text-embedding-3-large",
+    "claude-opus-4-8,text-embedding-3-large",
+]
+
+NUM_RECORDS = 250
+
+OUTPUT_TOKEN_RANGE = (200, 500)
+
+PARSER = ["pymupdf"]
+
+RANDOM_WEIGHTS = [0.8, 0.2]
+
+REASONING_EFFORTS = ["low", 
+                    "medium",
+                    "high",]
+
+RESEARCH_FIELDS = [
+    "Psychology",
+    "Medicine",
+    "Other",
+    None,
+]
+
+SURVEY_COMPARISON_TYPES = [
+    "general preregistration",
+    "clinical trials",
+]
+
+TASK_COMPARISON_TYPES = [0,1]
+
+TOTAL_SIMULATION_SECONDS = 60 * 60 * 24 * DAYS
+
+USE_CASES = [
+    "Literature Review & Synthesis",
+    "Data Extraction & Analysis",
+    "Hypothesis Generation",
+    "Drafting & Proofreading",
+    "Code Generation for Experiments",
+    None,
+]
+
+LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(name)s] [ENV: SIMULATION] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(SIMULATION_LOG_PATH, mode="a", encoding="utf-8"),
+        logging.FileHandler(LOG_FILE_PATH, mode="a", encoding="utf-8"),
     ],
 )
-logger = logging.getLogger(SCRIPT_NAME)
+logger = logging.getLogger("dashboard")
 
 
-def write_csv_atomically(
-    data: List[Dict], fieldnames: List[str], output_path: str
-) -> None:
+def write_csv_atomically(data: list[dict], fieldnames: list[str], output_path: Union[str, Path]) -> None:
     """Exports a list of dictionary records to a CSV file using an atomic write pattern."""
-    temp_path = f"{output_path}.tmp"
+
+    output_path = Path(output_path)
+    temp_path = output_path.with_name(f"{output_path.name}.tmp")
 
     try:
-        target_dir = os.path.dirname(output_path)
-        if target_dir:
-            os.makedirs(target_dir, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(temp_path, mode="w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(data)
 
-        os.replace(temp_path, output_path)
-        logger.info(f"Successfully exported {len(data)} rows to '{output_path}'.")
+        temp_path.replace(output_path)
+        logger.info(f"Successfully exported {len(data)} rows to '{output_path}'")
 
     except (OSError, Exception) as e:
         logger.error(f"File writing error during export to '{output_path}': {e}")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if temp_path.exists():
+            temp_path.unlink()
         sys.exit(1)
-
 
 def generate_redis_data() -> None:
     """Generates synthetic Redis survey records matching production schema."""
-    logger.info("Starting Script 01a (Mock): Redis Ingestion Simulation...")
+    logger.info("Starting Script 00a_mock_redis")
 
     records = []
-    base_time = datetime.now(timezone.utc) - timedelta(days=60)
+    base_time = datetime.now(timezone.utc) - timedelta(days=DAYS)
     
-    owner_pool = [str(uuid.uuid4()) for _ in range(20)]
+    owner_pool = get_shared_owner_pool()
 
     for _ in range(1, NUM_RECORDS + 1):
         task_id = str(uuid.uuid4())
 
-        random_seconds = random.randint(1, 60 * 24 * 60)
-        random_microseconds = random.randint(0, 999999)
+        random_seconds = random.randint(1, TOTAL_SIMULATION_SECONDS)
+        random_microseconds = random.randint(*MICROSECOND_RANGE)
         submitted_dt = base_time + timedelta(seconds=random_seconds, microseconds=random_microseconds)
         submitted_at = submitted_dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "+00:00"
 
-        state = random.choices([1, 0], weights=[0.85, 0.15], k=1)[0]
+        state = random.choices([1, 0], weights=RANDOM_WEIGHTS, k=1)[0]
         skipped = 1 if state == 0 else random.choice([0, 1])
         from_profile = random.choice([0, 1])
 
-        is_signed_in = random.choices([True, False], weights=[0.8, 0.2], k=1)[0]
+        is_signed_in = random.choices([True, False], weights=RANDOM_WEIGHTS, k=1)[0]
         owner_id = random.choice(owner_pool) if is_signed_in else None
 
         record = {
@@ -114,21 +195,24 @@ def generate_redis_data() -> None:
         }
 
         if is_signed_in:
-            cost_llm = round(random.uniform(0.01, 1.20), 4)
-            cost_embedding = round(random.uniform(0.0001, 0.02), 5)
+            input_tokens = random.randint(*INPUT_TOKEN_RANGE)
+            output_tokens = random.randint(*OUTPUT_TOKEN_RANGE)
+            embedding_tokens = random.randint(*EMBEDDING_TOKEN_RANGE)
+            cost_llm = round((input_tokens * COST_PER_INPUT_TOKEN) + (output_tokens * COST_PER_OUTPUT_TOKEN), 4)
+            cost_embedding = round(embedding_tokens * COST_PER_EMBEDDING, 4)
             cost_total = round(cost_llm + cost_embedding, 4)
 
             record.update({
                 "llm_client": random.choice(LLM_CLIENTS),
-                "parser_choice": "pymupdf",
+                "parser_choice": random.choice(PARSER),
                 "reasoning_effort": random.choice(REASONING_EFFORTS),
                 "cost_total_usd": cost_total,
                 "cost_llm_usd": cost_llm,
                 "cost_embedding_usd": cost_embedding,
-                "input_tokens": round(random.uniform(1500.0, 45000.0), 2),
-                "output_tokens": round(random.uniform(200.0, 5000.0), 2),
-                "embedding_tokens": round(random.uniform(500.0, 10000.0), 2),
-                "llm_calls": random.randint(1, 12),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "embedding_tokens": embedding_tokens,
+                "llm_calls": random.randint(*LLM_CALLS_RANGE),
                 "cost_estimate_complete": random.choice([True, False]),
                 "models_used": random.choice(MODEL_COMBINATIONS),
             })
@@ -150,37 +234,8 @@ def generate_redis_data() -> None:
 
         records.append(record)
 
-    fieldnames = [
-        "task_id",
-        "submitted_at",
-        "research_field",
-        "academic_position",
-        "use_case",
-        "skipped",
-        "from_profile",
-        "survey_comparison_type",
-        "state",
-        "task_comparison_type",
-        "total_dimensions",
-        "owner_id",
-        "is_signed_in",
-        "llm_client",
-        "parser_choice",
-        "reasoning_effort",
-        "cost_total_usd",
-        "cost_llm_usd",
-        "cost_embedding_usd",
-        "input_tokens",
-        "output_tokens",
-        "embedding_tokens",
-        "llm_calls",
-        "cost_estimate_complete",
-        "models_used",
-    ]
-
-    target_file = os.path.join(CSV_PATH, "survey_responses.csv")
-    write_csv_atomically(data=records, fieldnames=fieldnames, output_path=target_file)
-    logger.info("Script 01a (Mock) finished successfully. Redis simulation CSV updated.")
+    write_csv_atomically(data=records, fieldnames=FIELDNAMES, output_path=SURVEY_RESPONSE_CSV_PATH)
+    logger.info("Script 00a_mock_redis ended successfully")
 
 
 if __name__ == "__main__":

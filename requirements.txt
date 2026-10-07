@@ -1,4 +1,6 @@
+altair==6.3.0
 pandas==3.0.6
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 redis==8.1.0
-SQLAlchemy==2.0.54
+SQLAlchemy==2.1.3
+streamlit==1.64.0

@@ -8,29 +8,31 @@ directly from Redis Hashes and saves them as a deduplicated CSV file.
 import json
 import logging
 import os
+from pathlib import Path
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import pandas as pd
 import redis
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR if (SCRIPT_DIR / "config.py").exists() else SCRIPT_DIR.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import (
+    BATCH_SIZE,
     CONNECT_TIMEOUT_SECONDS,
     LOG_FILE_PATH,
-    REDIS_CSV_PATH,
+    REDIS_SURVEY_ID,
+    SURVEY_RESPONSE_CSV_PATH,
     REDIS_SURVEY_HASH_PREFIX,
     REDIS_SURVEY_INDEX,
     REDIS_TASK_FIELDS,
     REDIS_URL,
 )
 
-# Logging configuration
-SCRIPT_NAME = os.path.splitext(os.path.basename(__file__))[0]
+LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s",
@@ -39,11 +41,12 @@ logging.basicConfig(
         logging.FileHandler(LOG_FILE_PATH, mode="a", encoding="utf-8"),
     ],
 )
-logger = logging.getLogger(SCRIPT_NAME)
+logger = logging.getLogger("dashboard")
 
 
 def get_redis_client(redis_url: str) -> redis.Redis:
     """Establishes and tests a connection to Redis with explicit SSL/TLS parameters."""
+    
     try:
         client = redis.Redis.from_url(
             redis_url,
@@ -52,14 +55,14 @@ def get_redis_client(redis_url: str) -> redis.Redis:
             ssl_cert_reqs=None,
         )
         client.ping()
-        logger.info("Successfully connected and authenticated with Redis.")
+        logger.info("Successfully connected and authenticated with Redis")
         return client
     except redis.RedisError as e:
         logger.error(f"Failed to connect to Redis: {e}")
         sys.exit(1)
 
 
-def parse_json_safely(raw_val: Optional[str]) -> Dict[str, Any]:
+def parse_json_safely(raw_val: Optional[str]) -> dict[str, Any]:
     """Safely parses a JSON string, returning an empty dict on failure."""
     if not raw_val:
         return {}
@@ -73,16 +76,10 @@ def parse_json_safely(raw_val: Optional[str]) -> Dict[str, Any]:
         return {}
 
 
-def fetch_survey_and_task_metrics(
-    client: redis.Redis, batch_size: int = 500
-) -> List[Dict[str, Any]]:
-    """Iterates through Redis survey keys using pipeline batching and dynamic key definitions.
-
-    Args:
-        client (redis.Redis): Active Redis connection.
-        batch_size (int): Number of task IDs to process per network round-trip.
-    """
-    records: List[Dict[str, Any]] = []
+def fetch_survey_and_task_metrics(client: redis.Redis, batch_size: int = BATCH_SIZE) -> list[dict[str, Any]]:
+    """Iterates through Redis survey keys using pipeline batching and dynamic key definitions."""
+    
+    records: list[dict[str, Any]] = []
 
     try:
         task_ids = [
@@ -90,10 +87,10 @@ def fetch_survey_and_task_metrics(
         ]
 
         if not task_ids:
-            logger.warning(f"No task IDs found in '{REDIS_SURVEY_INDEX}'.")
+            logger.warning(f"No task IDs found in '{REDIS_SURVEY_INDEX}'")
             return records
 
-        logger.info(f"Found {len(task_ids)} entries in Redis. Processing in batches of {batch_size}...")
+        logger.info(f"Found {len(task_ids)} entries in Redis. Processing in batches of {batch_size}")
 
         total_batches = (len(task_ids) - 1) // batch_size + 1
 
@@ -145,16 +142,14 @@ def fetch_survey_and_task_metrics(
                     "embedding_tokens": cost_data.get("embedding_tokens"),
                     "llm_calls": cost_data.get("llm_calls"),
                     "cost_estimate_complete": cost_data.get("estimate_complete"),
-                    "models_used": ",".join(str(m) for m in models_list)
-                    if isinstance(models_list, list)
-                    else None,
+                    "models_used": ",".join(str(m) for m in models_list) if isinstance(models_list, list) else None,
                 }
                 records.append(record)
 
             if batch_idx % 5 == 0 or batch_idx == total_batches:
-                logger.info(f"Processed batch {batch_idx}/{total_batches} ({len(records)} records extracted so far).")
+                logger.info(f"Processed batch {batch_idx}/{total_batches} ({len(records)} records extracted so far)")
 
-        logger.info(f"Successfully processed {len(records)} total records from Redis.")
+        logger.info(f"Successfully processed {len(records)} total records from Redis")
         return records
 
     except redis.RedisError as e:
@@ -163,26 +158,27 @@ def fetch_survey_and_task_metrics(
 
 
 def load_existing_archive(file_path: str) -> Optional[pd.DataFrame]:
-    """Reads the existing historical CSV file if present. Hard-fails on read errors to protect historical data."""
+    """Reads the existing CSV file if present."""
+    
     if not os.path.exists(file_path):
-        logger.info(f"No existing archive found at '{file_path}'. Starting fresh.")
+        logger.info(f"No existing archive found at '{file_path}'. Starting fresh")
         return None
 
     try:
         df = pd.read_csv(file_path)
-        logger.info(f"Successfully loaded existing archive with {len(df)} records.")
+        logger.info(f"Successfully loaded existing archive with {len(df)} records")
         return df
     except Exception as e:
         logger.critical(
-            f"CRITICAL: Failed to read existing archive at '{file_path}': {e}. "
-            f"Aborting process to prevent data corruption/loss."
+            f"Failed to read existing archive at '{file_path}': {e}"
+            f"Aborting process to prevent data corruption/loss"
         )
         sys.exit(1)
 
 
-def merge_dataframes(
-    existing_df: Optional[pd.DataFrame], new_records: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Combines new records with the existing archive DataFrame."""
+def merge_dataframes(existing_df: Optional[pd.DataFrame], new_records: list[dict[str, Any]]) -> pd.DataFrame:
+    """Combines new records with the existing archive."""
+    
     new_df = pd.DataFrame(new_records)
 
     if existing_df is None or existing_df.empty:
@@ -194,8 +190,9 @@ def merge_dataframes(
     return pd.concat([existing_df, new_df], ignore_index=True)
 
 
-def deduplicate_dataframe(df: pd.DataFrame, primary_key: str = "task_id") -> pd.DataFrame:
+def deduplicate_dataframe(df: pd.DataFrame, primary_key: str = REDIS_SURVEY_ID) -> pd.DataFrame:
     """Deduplicates records by primary key, keeping the latest entry."""
+    
     if df.empty:
         return df
 
@@ -204,52 +201,58 @@ def deduplicate_dataframe(df: pd.DataFrame, primary_key: str = "task_id") -> pd.
         deduped_df = df.drop_duplicates(subset=[primary_key], keep="last")
     else:
         logger.warning(
-            f"Primary key '{primary_key}' not found in columns. Falling back to full-row deduplication."
+            f"Primary key '{primary_key}' not found in columns. Falling back to full-row deduplication"
         )
         deduped_df = df.drop_duplicates()
 
     retained_count = len(deduped_df)
     logger.info(
-        f"Deduplication complete: {initial_count - retained_count} duplicate records removed. "
-        f"Retained records: {retained_count}."
+        f"Deduplication complete: {initial_count - retained_count} duplicate records removed"
+        f"Retained records: {retained_count}"
     )
     return deduped_df
 
 
 def save_df_atomically(df: pd.DataFrame, output_path: str) -> None:
     """Writes DataFrame to a temporary file before replacing destination file."""
-    temp_path = f"{output_path}.tmp"
+
+    output_path = Path(output_path)
+    temp_path = output_path.with_name(f"{output_path.name}.tmp")
+    
     try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
         df.to_csv(temp_path, index=False, encoding="utf-8")
-        os.replace(temp_path, output_path)
-        logger.info(f"Successfully saved {len(df)} total records to '{output_path}'.")
+        temp_path.replace(output_path)
+        logger.info(f"Successfully saved {len(df)} total records to '{output_path}'")
     except (OSError, Exception) as e:
         logger.error(f"Failed to write file to '{output_path}': {e}")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if temp_path.exists():
+            temp_path.unlink()
         sys.exit(1)
 
 
 def main() -> None:
-    """Main execution flow for Redis to CSV pipeline."""
-    logger.info("Starting Script 01a: Redis Hash Ingestion...")
+    """Main execution flow for Redis to CSV."""
+    
+    logger.info("Starting Script 01a_ingest_redis_to_csv")
 
     client = get_redis_client(REDIS_URL)
 
-    records = fetch_survey_and_task_metrics(client, batch_size=500)
-    if not records and not os.path.exists(REDIS_CSV_PATH):
-        logger.warning("No new records fetched and no existing archive exists. Exiting.")
+    records = fetch_survey_and_task_metrics(client, batch_size=BATCH_SIZE)
+    if not records and not os.path.exists(SURVEY_RESPONSE_CSV_PATH):
+        logger.warning("No new records fetched and no existing archive exists. Exiting")
         return
 
-    existing_df = load_existing_archive(REDIS_CSV_PATH)
+    existing_df = load_existing_archive(SURVEY_RESPONSE_CSV_PATH)
 
     combined_df = merge_dataframes(existing_df, records)
 
-    final_df = deduplicate_dataframe(combined_df, primary_key="task_id")
+    final_df = deduplicate_dataframe(combined_df, primary_key=REDIS_SURVEY_ID)
 
-    save_df_atomically(final_df, REDIS_CSV_PATH)
+    save_df_atomically(final_df, SURVEY_RESPONSE_CSV_PATH)
 
-    logger.info("Script 01a finished successfully.")
+    logger.info("Script 01a_ingest_redis_to_csv ended successfully")
 
 
 if __name__ == "__main__":
